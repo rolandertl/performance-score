@@ -1,58 +1,61 @@
-
 import os
-import base64
 import requests
 import streamlit as st
 from urllib.parse import quote
+from typing import Optional
 
 # --- Config ---
 st.set_page_config(page_title="GTMetrix-ähnlicher Checker", page_icon="🚀", layout="centered")
 
-API_KEY = os.getenv("PSI_API_KEY", "").strip()  # optional; ohne Key gibts ein niedriges Quota
+def get_api_key() -> str:
+    # 1) Streamlit secrets.toml -> [api_keys].pagespeed
+    try:
+        key = st.secrets["api_keys"]["pagespeed"]
+        if isinstance(key, str) and key.strip():
+            return key.strip()
+    except Exception:
+        pass
+    # 2) Fallback: Umgebungsvariable
+    return os.getenv("PSI_API_KEY", "").strip()
+
+API_KEY = get_api_key()
 
 st.title("Webseiten-Check (MVP)")
 st.caption("Py + Streamlit + PageSpeed Insights (Lighthouse)")
 
 url = st.text_input("URL prüfen", placeholder="https://example.com", value="")
-col_strategy1, col_strategy2 = st.columns(2)
+col_strategy1, _ = st.columns(2)
 with col_strategy1:
     strategy = st.radio("Gerät", ["mobile", "desktop"], horizontal=True, index=1)
+
+if not API_KEY:
+    st.info("Hinweis: Kein API-Key gesetzt. Ohne Key ist das Google-Quota stark begrenzt und Anfragen können fehlschlagen. "
+            "Hinterlege den Key in `.streamlit/secrets.toml` unter `[api_keys].pagespeed` oder als Umgebungsvariable `PSI_API_KEY`.")
 
 run = st.button("Analysieren", type="primary")
 
 @st.cache_data(show_spinner=False)
-def run_pagespeed(url: str, strategy: str, api_key: str | None):
+def run_pagespeed(url: str, strategy: str, api_key: Optional[str]):
     base = "https://www.googleapis.com/pagespeedonline/v5/runPagespeed"
-    params = {
-        "url": url,
-        "strategy": strategy,
-        "category": "PERFORMANCE",
-    }
-    # Mehr Kategorien für mögliche "Structure"-Definition
-    # (SEO/Best Practices liefern bereits Scores)
-    # Doppelt anhängen ist egal – die API akzeptiert mehrere category-Parameter.
-    params["category"] = "PERFORMANCE"
-    # Note: Wir hängen weitere Kategorien per Liste an:
-    query = f"{base}?url={quote(url)}&strategy={strategy}&category=PERFORMANCE&category=BEST_PRACTICES&category=SEO"
+    # Kategorien: Performance (für Score + Audits), Best Practices (für „Struktur“), SEO (optional für spätere Gewichtung)
+    query = (
+        f"{base}?url={quote(url)}"
+        f"&strategy={strategy}"
+        f"&category=PERFORMANCE&category=BEST_PRACTICES&category=SEO"
+    )
     if api_key:
         query += f"&key={api_key}"
     resp = requests.get(query, timeout=60)
     resp.raise_for_status()
     return resp.json()
 
-def pct(score: float | None) -> float | None:
+def pct(score: Optional[float]) -> Optional[int]:
     if score is None:
         return None
     # Lighthouse liefert 0..1
     return round(score * 100)
 
-def to_ms(value):
-    if value is None:
-        return None
-    # Einige Werte kommen als ms, andere als s. LCP ist in s, TBT in ms, CLS ist unitless.
-    return value
-
-def grade_from_performance(perf_score_pct: int | None) -> str:
+def grade_from_performance(perf_score_pct: Optional[int]) -> str:
     if perf_score_pct is None:
         return "—"
     if perf_score_pct >= 90:
@@ -73,23 +76,22 @@ if run and url:
             st.error(f"Fehler beim Abruf: {e}")
             st.stop()
 
-    lh = data.get("lighthouseResult", {})
+    lh = data.get("lighthouseResult", {}) or {}
 
     # Scores
-    perf = pct(lh.get("categories", {}).get("performance", {}).get("score"))
-    # "Structure" (Platzhalter): Wir nehmen zunächst den Best-Practices-Score.
-    # Später können wir das in eine eigene Gewichtung aus SEO/Best Practices/und Audits überführen.
-    structure = pct(lh.get("categories", {}).get("best-practices", {}).get("score"))
+    cats = lh.get("categories", {}) or {}
+    perf = pct((cats.get("performance") or {}).get("score"))
+    # „Struktur“ (Platzhalter): Lighthouse Best Practices
+    structure = pct((cats.get("best-practices") or {}).get("score"))
 
     # Audits
-    audits = lh.get("audits", {})
-    lcp = audits.get("largest-contentful-paint", {}).get("displayValue")  # typ. z.B. "1.8 s"
-    tbt = audits.get("total-blocking-time", {}).get("numericValue")  # in ms
-    tbt_display = audits.get("total-blocking-time", {}).get("displayValue")  # z.B. "65 ms"
-    cls = audits.get("cumulative-layout-shift", {}).get("displayValue")  # z.B. "0.03"
+    audits = lh.get("audits", {}) or {}
+    lcp = (audits.get("largest-contentful-paint") or {}).get("displayValue")      # z. B. "1.8 s"
+    tbt_display = (audits.get("total-blocking-time") or {}).get("displayValue")   # z. B. "65 ms"
+    cls = (audits.get("cumulative-layout-shift") or {}).get("displayValue")       # z. B. "0.03"
 
     # Screenshot (Base64 aus final-screenshot)
-    fs = audits.get("final-screenshot", {}).get("details", {}).get("data")
+    fs = (audits.get("final-screenshot") or {}).get("details", {}).get("data")
 
     col1, col2, col3 = st.columns(3)
     with col1:
@@ -119,4 +121,5 @@ if run and url:
         st.json(data)
 
 else:
-    st.info("Geben Sie eine URL ein und klicken Sie auf **Analysieren**. Optional können Sie einen *PSI_API_KEY* als Umgebungsvariable setzen, um mehr Abrufe zu erlauben.")
+    st.info("Gib eine URL ein und klicke auf **Analysieren**. Den API-Key kannst du in `.streamlit/secrets.toml` "
+            "unter `[api_keys].pagespeed` oder als Umgebungsvariable `PSI_API_KEY` hinterlegen.")
